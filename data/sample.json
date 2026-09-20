@@ -1,0 +1,9 @@
+{
+  "event_id": "sample-003",
+  "event_type": "TICKET_CONFIRMED",
+  "aggregate_type": "match_ticket",
+  "aggregate_id": "aggregate-003",
+  "occurred_at": "2026-09-20T12:00:00+08:00",
+  "version": 1,
+  "summary": "赛事票根权益清算领域样例"
+}
