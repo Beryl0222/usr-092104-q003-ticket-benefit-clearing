@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "赛事票根权益清算领域事件",
+  "description": "票根权益与清算各渠道（票务、景区终端、离线同步、申诉、财政清算）交换的事件信封。事件只增不改；新版本以新事件表达，旧消费者忽略未知字段。",
   "type": "object",
   "required": [
     "event_id",
@@ -14,24 +15,52 @@
   "properties": {
     "event_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "全局唯一事件 ID（幂等键），重复投递以 event_id 去重"
     },
     "event_type": {
       "type": "string",
       "enum": [
+        "MATCH_SCHEDULED",
+        "MATCH_POSTPONED",
         "TICKET_CONFIRMED",
+        "TICKET_NOMINATED",
+        "TICKET_TRANSFERRED",
+        "TICKET_REFUNDED",
+        "TICKET_INVALIDATED",
+        "POLICY_PUBLISHED",
         "BENEFIT_GRANTED",
+        "BENEFIT_COMPANION_LINKED",
+        "BENEFIT_REVOKED",
+        "BENEFIT_ADJUSTED",
+        "SPOT_REGISTERED",
+        "SPOT_WINDOWS_UPDATED",
+        "SPOT_CLOSED",
+        "DEVICE_REGISTERED",
+        "REDEMPTION_PENDING",
         "REDEMPTION_CAPTURED",
+        "REDEMPTION_REJECTED",
+        "REDEMPTION_VOIDED",
+        "APPEAL_FILED",
+        "APPEAL_RESOLVED",
+        "CLEARING_BATCH_OPENED",
         "CLAIM_SETTLED",
-        "ENTRY_REVERSED"
+        "ENTRY_REVERSED",
+        "CLEARING_BATCH_CLOSED"
       ]
     },
     "aggregate_type": {
       "type": "string",
       "enum": [
+        "match_session",
         "match_ticket",
         "benefit_policy",
+        "benefit_account",
+        "scenic_spot",
+        "terminal_device",
         "redemption_proof",
+        "benefit_appeal",
+        "clearing_batch",
         "clearing_entry"
       ]
     },
@@ -41,16 +70,307 @@
     },
     "occurred_at": {
       "type": "string",
-      "format": "date-time"
+      "format": "date-time",
+      "description": "事件发生时间（含时区）。离线事件取终端本地发生时间，同步时不覆盖"
     },
     "version": {
       "type": "integer",
-      "minimum": 1
+      "minimum": 1,
+      "description": "聚合内单调递增版本号，用于乐观并发"
     },
     "summary": {
       "type": "string",
       "minLength": 1
+    },
+    "payload": {
+      "type": "object",
+      "description": "事件载荷，字段约定见 $defs 中同名事件定义"
+    },
+    "causation_id": {
+      "type": "string",
+      "description": "触发本事件的上游事件 ID（如 REDEMPTION_CAPTURED 源于离线 REDEMPTION_PENDING）"
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "同一业务流程（同步批次、申诉处理）的关联 ID"
     }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "$defs": {
+    "ticket_media": {
+      "enum": ["PAPER", "ELECTRONIC", "COMPLIMENTARY"],
+      "description": "纸票 / 电子票 / 赠票"
+    },
+    "ticket_status": {
+      "enum": ["CONFIRMED", "NOMINATED", "TRANSFERRED", "REFUNDED", "INVALIDATED"]
+    },
+    "redemption_scope": {
+      "enum": ["PER_SPOT", "GLOBAL"],
+      "description": "PER_SPOT=按景区分别计数，政策允许跨景区重复使用；GLOBAL=所有协议景区合计计数，跨景区去重。是否同日多点游览亦由此推出。"
+    },
+    "relationship": {
+      "enum": ["HOLDER", "FAMILY", "GUEST"],
+      "description": "持票人本人 / 家庭成员（代领）/ 同行人"
+    },
+    "MATCH_SCHEDULED": {
+      "payload": {
+        "match_code": "string，赛事场次编码",
+        "home_team": "string，主队（湘超主场）",
+        "away_team": "string",
+        "kicks_off_at": "date-time，原定开赛时间",
+        "venue": "string"
+      }
+    },
+    "MATCH_POSTPONED": {
+      "payload": {
+        "original_kicks_off_at": "date-time",
+        "new_kicks_off_at": "date-time",
+        "reason": "string。仅推动尚未消费权利的权益窗口平移，已消费核销不回滚"
+      }
+    },
+    "TICKET_CONFIRMED": {
+      "payload": {
+        "match_session_id": "string",
+        "serial": "string，票号（纸票防伪码/电子票订单号/赠票编号）",
+        "media": "$ref ticket_media",
+        "holder_token": "string，持票人不透明令牌（HMAC），非真实身份",
+        "issued_at": "date-time"
+      }
+    },
+    "TICKET_NOMINATED": {
+      "payload": {
+        "holder_token": "记名后的持票人令牌",
+        "channel": "string，记名渠道"
+      }
+    },
+    "TICKET_TRANSFERRED": {
+      "payload": {
+        "from_holder_token": "string",
+        "to_holder_token": "string",
+        "note": "转赠只转移尚未消费的剩余权利，已消费记录不变"
+      }
+    },
+    "TICKET_REFUNDED": {
+      "payload": {
+        "refunded_at": "date-time（赛后退票允许）",
+        "reason": "string。只作废尚未消费的对应权利，已核销部分参与清算不受影响"
+      }
+    },
+    "TICKET_INVALIDATED": {
+      "payload": {
+        "reason": "string，如防伪失败、重复票"
+      }
+    },
+    "POLICY_PUBLISHED": {
+      "payload": {
+        "policy_code": "string，政策编码（版本不可变，发布即生效区间固定）",
+        "policy_version": "integer，从 1 递增",
+        "effective_from": "date-time",
+        "effective_to": "date-time|null，空表示长期有效",
+        "match_window": {
+          "relative_to": "enum KICKOFF，窗口锚点（随比赛延期自动平移）",
+          "start_offset_hours": "integer，可为负（赛前）",
+          "end_offset_hours": "integer（赛后）"
+        },
+        "redemption_scope": "$ref redemption_scope",
+        "max_per_spot": "integer，每个景区可用次数（PER_SPOT 时生效）",
+        "max_total": "integer，全部景区合计次数（GLOBAL 时生效）",
+        "companions_allowed": "boolean，是否允许家庭代领/同行",
+        "max_companions": "integer",
+        "spot_terms": [
+          {
+            "spot_id": "string",
+            "agreed_price_cents": "integer，协议减免计价（分），清算只取计价所需金额",
+            "requires_nomination": "boolean，是否要求记名"
+          }
+        ]
+      }
+    },
+    "BENEFIT_GRANTED": {
+      "payload": {
+        "ticket_id": "string，来源票根",
+        "match_session_id": "string",
+        "policy_id": "string，授予时锁定的政策版本",
+        "holder_token": "string",
+        "companion_tokens": ["同行人令牌，含家庭代领成员"],
+        "window": { "from": "date-time", "to": "date-time，授予时按赛程计算的副本" }
+      }
+    },
+    "BENEFIT_REVOKED": {
+      "payload": {
+        "reason_code": "enum TICKET_REFUNDED|TICKET_INVALIDATED|POLICY_CHANGE|TICKET_TRANSFERRED",
+        "upstream_event_id": "string，触发事件",
+        "holder_token": "string，可选：转赠后的新持票人令牌（剩余权利随之转移，已消费不变）",
+        "note": "仅冻结剩余权利；已消费权利不撤销"
+      }
+    },
+    "BENEFIT_COMPANION_LINKED": {
+      "payload": {
+        "person_token": "string，家庭/同行人不透明令牌",
+        "relationship": "$ref relationship（FAMILY 家庭代领 / GUEST 同行）",
+        "terms": [
+          { "term_id": "string", "spot_id": "string|null（GLOBAL 时为空）", "total": "integer" }
+        ],
+        "linked_at": "date-time"
+      }
+    },
+    "BENEFIT_ADJUSTED": {
+      "payload": {
+        "reason_code": "enum MATCH_POSTPONED|SPOT_CLOSURE|APPEAL_GRANTED|DEVICE_RECONCILE|TICKET_TRANSFERRED",
+        "holder_token": "string，可选：账户当前持票人变更（转赠）",
+        "window": "新窗口副本（延期平移/闭园补偿），可选",
+        "quota_grants": [
+          { "person_token": "string", "spot_id": "string|null", "amount": "integer，增加的次数" }
+        ],
+        "quota_revokes": [
+          { "person_token": "string", "spot_id": "string|null", "amount": "integer，按剩余次数扣减；已消费记录不受影响" }
+        ],
+        "upstream_event_id": "string"
+      }
+    },
+    "SPOT_REGISTERED": {
+      "payload": {
+        "name": "string",
+        "windows": [
+          { "from": "date-time", "to": "date-time", "weekdays": ["1..7"], "open": "HH:MM", "close": "HH:MM" }
+        ],
+        "remote_offline_allowed": "boolean，山水断网景区标记"
+      }
+    },
+    "SPOT_WINDOWS_UPDATED": {
+      "payload": {
+        "windows": "同 SPOT_REGISTERED.windows，整体替换；只影响未发生核销"
+      }
+    },
+    "SPOT_CLOSED": {
+      "payload": {
+        "from": "date-time",
+        "to": "date-time",
+        "reason": "string，临时闭园；区间内核销拒绝，区间损失可经 BENEFIT_ADJUSTED 补偿"
+      }
+    },
+    "DEVICE_REGISTERED": {
+      "payload": {
+        "device_id": "string",
+        "spot_id": "string，设备绑定景区（防跨景区冒刷）",
+        "public_key_hint": "string",
+        "offline_quota": "integer，离线签发待同步凭证的额度"
+      }
+    },
+    "REDEMPTION_PENDING": {
+      "payload": {
+        "device_id": "string，签发设备",
+        "spot_id": "string",
+        "account_id": "string",
+        "person_token": "string，实际入园人",
+        "relationship": "$ref relationship",
+        "policy_id": "string，终端快照的政策版本",
+        "benefit_term_id": "string，权利项（某人×某景区的额度）",
+        "occurred_on_device_at": "date-time，设备发生时间",
+        "device_seq": "integer，设备内单调序号",
+        "signature": "string，设备签名",
+        "sync_state": "enum PENDING"
+      }
+    },
+    "REDEMPTION_CAPTURED": {
+      "payload": {
+        "device_id": "string",
+        "spot_id": "string",
+        "account_id": "string",
+        "person_token": "string",
+        "relationship": "$ref relationship",
+        "policy_id": "string，实际生效政策版本（拒绝/计价依据）",
+        "benefit_term_id": "string",
+        "channel": "enum ONLINE|OFFLINE_SYNC",
+        "occurred_on_device_at": "date-time，业务发生时间，离线优先于同步时间",
+        "device_seq": "integer|null",
+        "agreed_price_cents": "integer，结算计价快照",
+        "pending_proof_id": "string|null，来源待同步凭证",
+        "synced_at": "date-time|null"
+      }
+    },
+    "REDEMPTION_REJECTED": {
+      "payload": {
+        "device_id": "string",
+        "spot_id": "string",
+        "account_id": "string|null",
+        "person_token": "string|null",
+        "policy_id": "string|null，判定所用规则版本（无可用政策时为空）",
+        "reason_code": "enum OUTSIDE_WINDOW|SPOT_CLOSED|SPOT_NOT_COVERED|QUOTA_USED|NOT_NOMINATED|RELATIONSHIP_DENIED|DEVICE_SPOT_MISMATCH|TICKET_REFUNDED|TICKET_INVALIDATED|EXPIRED_POLICY|DEVICE_UNKNOWN|OFFLINE_QUOTA_EXCEEDED|SIGNATURE_INVALID",
+        "rule_detail": "string，人读依据，引用政策条款版本",
+        "occurred_on_device_at": "date-time",
+        "channel": "ONLINE|OFFLINE_SYNC"
+      }
+    },
+    "REDEMPTION_VOIDED": {
+      "payload": {
+        "pending_proof_id": "string",
+        "reason_code": "enum DOUBLE_SPEND|SIGNATURE_INVALID|STALE_DEVICE|QUOTA_CONFLICT",
+        "note": "离线合并冲突：同一权利项在发生时间线上已被消费，后到者作废并支持申诉"
+      }
+    },
+    "APPEAL_FILED": {
+      "payload": {
+        "account_id": "string",
+        "person_token": "string",
+        "subject_type": "enum REJECTION|VOIDED_PENDING|CLOSURE_LOSS|OTHER",
+        "subject_event_id": "string，被申诉的拒绝/作废事件",
+        "evidence": [
+          { "evidence_id": "string", "kind": "string（PHOTO|RECEIPT|SCREENSHOT|STATEMENT）", "sha256": "string", "submitted_at": "date-time" }
+        ],
+        "statement": "string"
+      }
+    },
+    "APPEAL_RESOLVED": {
+      "payload": {
+        "decision": "enum UPHELD|REJECTED",
+        "resolved_by": "string，处理方",
+        "resolution": "string",
+        "adjustment_event_id": "string|null，支持时发出的 BENEFIT_ADJUSTED/ENTRY_REVERSED"
+      }
+    },
+    "CLEARING_BATCH_OPENED": {
+      "payload": {
+        "period_from": "date-time",
+        "period_to": "date-time",
+        "opened_by": "string"
+      }
+    },
+    "CLAIM_SETTLED": {
+      "payload": {
+        "batch_id": "string",
+        "spot_id": "string",
+        "redemption_event_id": "string，对应核销事件（回查锚点）",
+        "account_id": "string",
+        "policy_id": "string，计价政策版本",
+        "amount_cents": "integer，补贴金额",
+        "priced_at": "date-time",
+        "ticket_id": "string，票根不透明 ID（清算侧不拿票号/身份，仅计价核验所需）",
+        "ticket_status_snapshot": "string，计价时票务状态回查快照",
+        "ticket_media": "string，票介质（PAPER/ELECTRONIC/COMPLIMENTARY）",
+        "device_id": "string，核销设备",
+        "channel": "ONLINE|OFFLINE_SYNC",
+        "occurred_on_device_at": "date-time，核销业务发生时间"
+      }
+    },
+    "ENTRY_REVERSED": {
+      "payload": {
+        "batch_id": "string",
+        "original_entry_id": "string",
+        "reason_code": "enum APPEAL|FRAUD|DOUBLE_SPEND|RE_PRICE",
+        "amount_cents": "integer，冲正金额（负数）",
+        "upstream_event_id": "string",
+        "quota_restored": "boolean，是否回补游客权益"
+      }
+    },
+    "CLEARING_BATCH_CLOSED": {
+      "payload": {
+        "total_cents": "integer",
+        "reversal_cents": "integer",
+        "net_cents": "integer",
+        "entry_count": "integer",
+        "closed_at": "date-time"
+      }
+    }
+  }
 }
